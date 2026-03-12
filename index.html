@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Poker Bot — Daniel Zagaynov</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a12; overflow-x: hidden; }
+  #root { min-height: 100vh; }
+  .back-link {
+    position: fixed; top: 16px; left: 16px; z-index: 100;
+    font-family: 'DM Mono', monospace; font-size: 13px;
+    color: #6ee7b7; text-decoration: none;
+    display: flex; align-items: center; gap: 6px;
+    background: rgba(10,10,18,0.8); backdrop-filter: blur(12px);
+    padding: 8px 16px; border-radius: 8px;
+    border: 1px solid rgba(110,231,183,0.15);
+    transition: all 0.25s;
+  }
+  .back-link:hover { border-color: rgba(110,231,183,0.4); background: rgba(110,231,183,0.08); }
+</style>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+// ─── Card & Deck Logic ─────────────────────────────────────────────────────
+const SUITS = ["♠", "♥", "♦", "♣"];
+const RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"];
+const RANK_VALUES = Object.fromEntries(RANKS.map((r, i) => [r, i + 2]));
+
+const createDeck = () => {
+  const deck = [];
+  for (const suit of SUITS) for (const rank of RANKS) deck.push({ suit, rank });
+  for (let i = deck.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [deck[i], deck[j]] = [deck[j], deck[i]];
+  }
+  return deck;
+};
+
+const isRed = (suit) => suit === "♥" || suit === "♦";
+
+// ─── Hand Evaluation ────────────────────────────────────────────────────────
+const HAND_RANKS = {
+  "Royal Flush": 9, "Straight Flush": 8, "Four of a Kind": 7,
+  "Full House": 6, "Flush": 5, "Straight": 4, "Three of a Kind": 3,
+  "Two Pair": 2, "One Pair": 1, "High Card": 0,
+};
+
+function evaluateBestHand(cards) {
+  if (cards.length < 5) return { rank: -1, name: "Incomplete", highCards: [] };
+  let best = null;
+  const combos = getCombinations(cards, 5);
+  for (const combo of combos) {
+    const result = evaluateHand(combo);
+    if (!best || result.rank > best.rank || (result.rank === best.rank && compareHighCards(result.highCards, best.highCards) > 0)) {
+      best = result;
+    }
+  }
+  return best;
+}
+
+function getCombinations(arr, k) {
+  if (k === 0) return [[]];
+  if (arr.length === 0) return [];
+  const [first, ...rest] = arr;
+  const withFirst = getCombinations(rest, k - 1).map((c) => [first, ...c]);
+  const withoutFirst = getCombinations(rest, k);
+  return [...withFirst, ...withoutFirst];
+}
+
+function evaluateHand(cards) {
+  const values = cards.map((c) => RANK_VALUES[c.rank]).sort((a, b) => b - a);
+  const suits = cards.map((c) => c.suit);
+  const isFlush = suits.every((s) => s === suits[0]);
+  const unique = [...new Set(values)].sort((a, b) => b - a);
+  const isStraight = unique.length === 5 && unique[0] - unique[4] === 4;
+  const isLowStraight = unique.length === 5 && unique[0] === 14 && unique[1] === 5;
+
+  const counts = {};
+  values.forEach((v) => (counts[v] = (counts[v] || 0) + 1));
+  const groups = Object.entries(counts).sort((a, b) => b[1] - a[1] || b[0] - a[0]);
+
+  if (isFlush && isStraight && values[0] === 14) return { rank: 9, name: "Royal Flush", highCards: values };
+  if (isFlush && (isStraight || isLowStraight)) return { rank: 8, name: "Straight Flush", highCards: isLowStraight ? [5, 4, 3, 2, 1] : values };
+  if (groups[0][1] === 4) return { rank: 7, name: "Four of a Kind", highCards: [+groups[0][0], +groups[1][0]] };
+  if (groups[0][1] === 3 && groups[1][1] === 2) return { rank: 6, name: "Full House", highCards: [+groups[0][0], +groups[1][0]] };
+  if (isFlush) return { rank: 5, name: "Flush", highCards: values };
+  if (isStraight) return { rank: 4, name: "Straight", highCards: values };
+  if (isLowStraight) return { rank: 4, name: "Straight", highCards: [5, 4, 3, 2, 1] };
+  if (groups[0][1] === 3) return { rank: 3, name: "Three of a Kind", highCards: [+groups[0][0], ...values.filter((v) => v !== +groups[0][0])] };
+  if (groups[0][1] === 2 && groups[1][1] === 2) {
+    const pairs = [+groups[0][0], +groups[1][0]].sort((a, b) => b - a);
+    const kicker = values.find((v) => v !== pairs[0] && v !== pairs[1]);
+    return { rank: 2, name: "Two Pair", highCards: [...pairs, kicker] };
+  }
+  if (groups[0][1] === 2) return { rank: 1, name: "One Pair", highCards: [+groups[0][0], ...values.filter((v) => v !== +groups[0][0])] };
+  return { rank: 0, name: "High Card", highCards: values };
+}
+
+function compareHighCards(a, b) {
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return 0;
+}
+
+// ─── Bot AI ─────────────────────────────────────────────────────────────────
+function botDecision(botCards, communityCards, pot, currentBet, botChips, stage) {
+  const allCards = [...botCards, ...communityCards];
+  const hand = communityCards.length >= 3 ? evaluateBestHand(allCards) : null;
+  const handRank = hand ? hand.rank : -1;
+
+  const highCardValue = Math.max(RANK_VALUES[botCards[0].rank], RANK_VALUES[botCards[1].rank]);
+  const isPair = botCards[0].rank === botCards[1].rank;
+  const isSuited = botCards[0].suit === botCards[1].suit;
+  const gap = Math.abs(RANK_VALUES[botCards[0].rank] - RANK_VALUES[botCards[1].rank]);
+
+  let strength = 0;
+
+  if (stage === "preflop") {
+    if (isPair) strength = 0.5 + (RANK_VALUES[botCards[0].rank] / 14) * 0.5;
+    else {
+      strength = (highCardValue / 14) * 0.4;
+      if (isSuited) strength += 0.1;
+      if (gap <= 2) strength += 0.1;
+      if (highCardValue >= 12) strength += 0.15;
+    }
+  } else {
+    strength = handRank / 9;
+    if (handRank === 0) strength = highCardValue / 28;
+  }
+
+  const noise = (Math.random() - 0.5) * 0.15;
+  strength = Math.max(0, Math.min(1, strength + noise));
+
+  const callAmount = currentBet;
+  const potOdds = callAmount > 0 ? callAmount / (pot + callAmount) : 0;
+
+  if (strength > 0.75) {
+    const raiseAmount = Math.min(Math.floor(pot * (0.5 + Math.random() * 0.75)), botChips);
+    return { action: "raise", amount: Math.max(raiseAmount, currentBet * 2) };
+  }
+  if (strength > 0.45 || (strength > 0.3 && potOdds < 0.3)) {
+    if (currentBet === 0) {
+      if (Math.random() > 0.5) {
+        const betAmount = Math.min(Math.floor(pot * (0.3 + Math.random() * 0.4)), botChips);
+        return { action: "raise", amount: Math.max(betAmount, 20) };
+      }
+      return { action: "check" };
+    }
+    return { action: "call" };
+  }
+  if (currentBet === 0) return { action: "check" };
+  if (strength > 0.2 && Math.random() > 0.6) {
+    const bluffAmount = Math.min(Math.floor(pot * (0.5 + Math.random() * 0.5)), botChips);
+    return { action: "raise", amount: Math.max(bluffAmount, currentBet * 2) };
+  }
+  return { action: "fold" };
+}
+
+// ─── Card Component ─────────────────────────────────────────────────────────
+function Card({ card, faceDown = false, small = false, highlight = false }) {
+  const red = card && isRed(card.suit);
+  const w = small ? 52 : 72;
+  const h = small ? 76 : 104;
+
+  if (faceDown) {
+    return (
+      <div style={{
+        width: w, height: h, borderRadius: 8, border: "1px solid #333",
+        background: "linear-gradient(135deg, #1a3a5c 25%, #0e2740 25%, #0e2740 50%, #1a3a5c 50%, #1a3a5c 75%, #0e2740 75%)",
+        backgroundSize: "12px 12px",
+        boxShadow: highlight ? "0 0 12px rgba(255,215,0,0.6)" : "0 2px 8px rgba(0,0,0,0.5)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        transition: "transform 0.3s ease, box-shadow 0.3s ease",
+      }}>
+        <div style={{
+          width: w - 12, height: h - 12, borderRadius: 4,
+          border: "1px solid #2a5a8a", display: "flex", alignItems: "center", justifyContent: "center",
+          color: "#2a5a8a", fontSize: small ? 16 : 22, fontWeight: "bold",
+        }}>♠</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      width: w, height: h, borderRadius: 8, border: "1px solid #444",
+      background: "linear-gradient(145deg, #f8f6f0, #e8e4da)",
+      boxShadow: highlight ? "0 0 16px rgba(255,215,0,0.7), 0 4px 12px rgba(0,0,0,0.3)" : "0 2px 8px rgba(0,0,0,0.4)",
+      display: "flex", flexDirection: "column", justifyContent: "space-between",
+      padding: small ? "3px 5px" : "5px 7px", position: "relative",
+      color: red ? "#c0392b" : "#1a1a2e",
+      fontFamily: "'Georgia', serif", transition: "transform 0.3s ease, box-shadow 0.3s ease",
+    }}>
+      <div style={{ fontSize: small ? 13 : 17, fontWeight: "bold", lineHeight: 1 }}>
+        {card.rank}<br />
+        <span style={{ fontSize: small ? 11 : 14 }}>{card.suit}</span>
+      </div>
+      <div style={{
+        position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
+        fontSize: small ? 22 : 32, opacity: 0.15,
+      }}>{card.suit}</div>
+      <div style={{
+        fontSize: small ? 13 : 17, fontWeight: "bold", lineHeight: 1,
+        alignSelf: "flex-end", transform: "rotate(180deg)",
+      }}>
+        {card.rank}<br />
+        <span style={{ fontSize: small ? 11 : 14 }}>{card.suit}</span>
+      </div>
+    </div>
+  );
+}
+
+// ─── Chip Stack Component ───────────────────────────────────────────────────
+function ChipStack({ amount }) {
+  const chipColors = ["#e74c3c", "#3498db", "#2ecc71", "#1a1a2e", "#f1c40f"];
+  const chipCount = Math.min(Math.ceil(amount / 50), 5);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <div style={{ position: "relative", width: 28, height: 20 + chipCount * 4 }}>
+        {Array.from({ length: chipCount }).map((_, i) => (
+          <div key={i} style={{
+            position: "absolute", bottom: i * 4, left: 0,
+            width: 28, height: 20, borderRadius: 14,
+            background: chipColors[i % chipColors.length],
+            border: "2px solid rgba(255,255,255,0.3)",
+            boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
+          }} />
+        ))}
+      </div>
+      <span style={{
+        color: "#f1c40f", fontWeight: 700, fontSize: 15,
+        fontFamily: "'JetBrains Mono', monospace", textShadow: "0 1px 2px rgba(0,0,0,0.5)",
+      }}>${amount}</span>
+    </div>
+  );
+}
+
+// ─── Stages ─────────────────────────────────────────────────────────────────
+const STAGES = ["preflop", "flop", "turn", "river", "showdown"];
+
+// ─── Main Game Component ────────────────────────────────────────────────────
+function PokerBot() {
+  const [gameState, setGameState] = useState(null);
+  const [playerChips, setPlayerChips] = useState(1000);
+  const [botChips, setBotChips] = useState(1000);
+  const [log, setLog] = useState([]);
+  const [showBotCards, setShowBotCards] = useState(false);
+  const [isAnimating, setIsAnimating] = useState(false);
+  const [handResult, setHandResult] = useState(null);
+  const [raiseAmount, setRaiseAmount] = useState(40);
+  const [handsPlayed, setHandsPlayed] = useState(0);
+  const [handsWon, setHandsWon] = useState(0);
+  const [showRules, setShowRules] = useState(false);
+  const logRef = useRef(null);
+
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [log]);
+
+  const addLog = useCallback((msg) => setLog((prev) => [...prev.slice(-30), msg]), []);
+
+  const startNewHand = useCallback(() => {
+    if (playerChips < 10 || botChips < 10) {
+      addLog(playerChips < 10 ? "💸 You're out of chips! Game over." : "🎉 Bot is busted! You win!");
+      return;
+    }
+    const deck = createDeck();
+    const smallBlind = 10;
+    const bigBlind = 20;
+    const pChips = playerChips - bigBlind;
+    const bChips = botChips - smallBlind;
+    setPlayerChips(pChips);
+    setBotChips(bChips);
+    setShowBotCards(false);
+    setHandResult(null);
+    setRaiseAmount(40);
+    setGameState({
+      deck, stage: "preflop",
+      playerCards: [deck[0], deck[2]], botCards: [deck[1], deck[3]],
+      community: [], pot: smallBlind + bigBlind,
+      currentBet: bigBlind - smallBlind, deckIndex: 4,
+      playerTurn: true, lastAction: null, handOver: false,
+    });
+    setHandsPlayed((p) => p + 1);
+    addLog("── New Hand ── Blinds posted. Your turn.");
+  }, [playerChips, botChips, addLog]);
+
+  const advanceStage = useCallback((state, pChips, bChips) => {
+    const stageIdx = STAGES.indexOf(state.stage);
+    if (stageIdx >= 3 || state.stage === "river") {
+      resolveShowdown(state, pChips, bChips);
+      return;
+    }
+    const nextStage = STAGES[stageIdx + 1];
+    let newCommunity = [...state.community];
+    let idx = state.deckIndex;
+    if (nextStage === "flop") {
+      newCommunity = [state.deck[idx], state.deck[idx + 1], state.deck[idx + 2]];
+      idx += 3;
+    } else {
+      newCommunity.push(state.deck[idx]);
+      idx += 1;
+    }
+    addLog(`─ ${nextStage.charAt(0).toUpperCase() + nextStage.slice(1)} ─`);
+    const newState = {
+      ...state, stage: nextStage, community: newCommunity,
+      deckIndex: idx, currentBet: 0, playerTurn: true, lastAction: null,
+    };
+    setGameState(newState);
+    setTimeout(() => doBotTurn(newState, pChips, bChips), 800);
+  }, [addLog]);
+
+  const resolveShowdown = useCallback((state, pChips, bChips) => {
+    setShowBotCards(true);
+    let community = [...state.community];
+    let idx = state.deckIndex;
+    while (community.length < 5) {
+      community.push(state.deck[idx]);
+      idx++;
+    }
+    const playerHand = evaluateBestHand([...state.playerCards, ...community]);
+    const botHand = evaluateBestHand([...state.botCards, ...community]);
+    const comp = playerHand.rank !== botHand.rank
+      ? playerHand.rank - botHand.rank
+      : compareHighCards(playerHand.highCards, botHand.highCards);
+
+    let resultMsg;
+    if (comp > 0) {
+      setPlayerChips(pChips + state.pot);
+      resultMsg = `🏆 You win $${state.pot}! (${playerHand.name} vs ${botHand.name})`;
+      setHandsWon((w) => w + 1);
+    } else if (comp < 0) {
+      setBotChips(bChips + state.pot);
+      resultMsg = `😤 Bot wins $${state.pot}. (${botHand.name} vs ${playerHand.name})`;
+    } else {
+      const half = Math.floor(state.pot / 2);
+      setPlayerChips(pChips + half);
+      setBotChips(bChips + state.pot - half);
+      resultMsg = `🤝 Split pot! Both had ${playerHand.name}.`;
+    }
+    setHandResult(resultMsg);
+    addLog(resultMsg);
+    setGameState((s) => ({ ...s, community, deckIndex: idx, handOver: true }));
+  }, [addLog]);
+
+  const doBotTurn = useCallback((state, pChips, bChips) => {
+    if (state.handOver) return;
+    setIsAnimating(true);
+    const decision = botDecision(state.botCards, state.community, state.pot, state.currentBet, bChips, state.stage);
+
+    setTimeout(() => {
+      if (decision.action === "fold") {
+        addLog("🤖 Bot folds.");
+        setPlayerChips(pChips + state.pot);
+        setHandResult(`🏆 You win $${state.pot}! Bot folded.`);
+        setHandsWon((w) => w + 1);
+        addLog(`🏆 You win $${state.pot}!`);
+        setGameState((s) => ({ ...s, handOver: true }));
+      } else if (decision.action === "check") {
+        addLog("🤖 Bot checks.");
+        if (state.lastAction === "check" || state.lastAction === "playerCheck") {
+          advanceStage(state, pChips, bChips);
+        } else {
+          setGameState((s) => ({ ...s, playerTurn: true, lastAction: "botCheck" }));
+        }
+      } else if (decision.action === "call") {
+        const callAmt = Math.min(state.currentBet, bChips);
+        setBotChips(bChips - callAmt);
+        addLog(`🤖 Bot calls $${callAmt}.`);
+        const newState = { ...state, pot: state.pot + callAmt, currentBet: 0 };
+        advanceStage(newState, pChips, bChips - callAmt);
+      } else if (decision.action === "raise") {
+        const raiseAmt = Math.min(decision.amount, bChips);
+        setBotChips(bChips - raiseAmt);
+        addLog(`🤖 Bot raises to $${raiseAmt}.`);
+        setGameState((s) => ({
+          ...s, pot: s.pot + raiseAmt, currentBet: raiseAmt - state.currentBet,
+          playerTurn: true, lastAction: "botRaise",
+        }));
+      }
+      setIsAnimating(false);
+    }, 600 + Math.random() * 800);
+  }, [addLog, advanceStage]);
+
+  const playerAction = useCallback((action, amount = 0) => {
+    if (!gameState || !gameState.playerTurn || gameState.handOver || isAnimating) return;
+    const state = { ...gameState };
+    let pChips = playerChips;
+    let bChips = botChips;
+
+    if (action === "fold") {
+      addLog("You fold.");
+      setBotChips(bChips + state.pot);
+      setHandResult(`😤 Bot wins $${state.pot}. You folded.`);
+      addLog(`Bot wins $${state.pot}.`);
+      setGameState((s) => ({ ...s, handOver: true }));
+      setShowBotCards(true);
+      return;
+    }
+
+    if (action === "check") {
+      addLog("You check.");
+      if (state.lastAction === "botCheck") {
+        advanceStage(state, pChips, bChips);
+        return;
+      }
+      const newState = { ...state, playerTurn: false, lastAction: "playerCheck" };
+      setGameState(newState);
+      setTimeout(() => doBotTurn(newState, pChips, bChips), 800);
+      return;
+    }
+
+    if (action === "call") {
+      const callAmt = Math.min(state.currentBet, pChips);
+      pChips -= callAmt;
+      setPlayerChips(pChips);
+      addLog(`You call $${callAmt}.`);
+      const newState = { ...state, pot: state.pot + callAmt, currentBet: 0, lastAction: "playerCall" };
+      if (state.lastAction === "botRaise") {
+        advanceStage(newState, pChips, bChips);
+      } else {
+        setGameState({ ...newState, playerTurn: false });
+        setTimeout(() => doBotTurn(newState, pChips, bChips), 800);
+      }
+      return;
+    }
+
+    if (action === "raise") {
+      const raiseAmt = Math.min(amount, pChips);
+      pChips -= raiseAmt;
+      setPlayerChips(pChips);
+      addLog(`You raise to $${raiseAmt}.`);
+      const newState = {
+        ...state, pot: state.pot + raiseAmt,
+        currentBet: raiseAmt - state.currentBet,
+        playerTurn: false, lastAction: "playerRaise",
+      };
+      setGameState(newState);
+      setTimeout(() => doBotTurn(newState, pChips, bChips), 800);
+    }
+  }, [gameState, playerChips, botChips, isAnimating, addLog, advanceStage, doBotTurn]);
+
+  const canCheck = gameState && gameState.currentBet === 0;
+  const canCall = gameState && gameState.currentBet > 0;
+  const isPlayerTurn = gameState && gameState.playerTurn && !gameState.handOver && !isAnimating;
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: "linear-gradient(160deg, #0a0a12 0%, #111827 50%, #0a0a12 100%)",
+      fontFamily: "'Segoe UI', system-ui, sans-serif", color: "#e2e8f0",
+      display: "flex", flexDirection: "column", alignItems: "center",
+      padding: "20px 12px", position: "relative", overflow: "hidden",
+    }}>
+      <div style={{
+        position: "fixed", top: "-20%", left: "30%", width: 500, height: 500,
+        background: "radial-gradient(circle, rgba(16,185,129,0.06) 0%, transparent 70%)",
+        pointerEvents: "none",
+      }} />
+      <div style={{
+        position: "fixed", bottom: "-10%", right: "20%", width: 400, height: 400,
+        background: "radial-gradient(circle, rgba(245,158,11,0.05) 0%, transparent 70%)",
+        pointerEvents: "none",
+      }} />
+
+      <div style={{ textAlign: "center", marginBottom: 16, marginTop: 32, position: "relative", zIndex: 1 }}>
+        <h1 style={{
+          fontSize: 28, fontWeight: 800, margin: 0,
+          background: "linear-gradient(135deg, #f59e0b, #ef4444, #f59e0b)",
+          WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+          letterSpacing: 2, textTransform: "uppercase",
+        }}>
+          ♠ Poker Bot ♠
+        </h1>
+        <p style={{ color: "#64748b", fontSize: 12, margin: "4px 0 0", letterSpacing: 3, textTransform: "uppercase" }}>
+          Texas Hold'em • Heads Up
+        </p>
+        <p style={{ color: "#475569", fontSize: 11, margin: "4px 0 0" }}>
+          by Daniel Zagaynov
+        </p>
+      </div>
+
+      <div style={{
+        display: "flex", gap: 24, marginBottom: 16, padding: "8px 20px",
+        background: "rgba(255,255,255,0.03)", borderRadius: 8,
+        border: "1px solid rgba(255,255,255,0.06)", fontSize: 13,
+      }}>
+        <span>Hands: <b style={{ color: "#f59e0b" }}>{handsPlayed}</b></span>
+        <span>Won: <b style={{ color: "#10b981" }}>{handsWon}</b></span>
+        <span>Win%: <b style={{ color: "#60a5fa" }}>{handsPlayed ? Math.round((handsWon / handsPlayed) * 100) : 0}%</b></span>
+        <button onClick={() => setShowRules(!showRules)} style={{
+          background: "none", border: "none", color: "#64748b", cursor: "pointer",
+          fontSize: 13, textDecoration: "underline",
+        }}>Rules</button>
+      </div>
+
+      {showRules && (
+        <div style={{
+          background: "rgba(0,0,0,0.6)", backdropFilter: "blur(8px)",
+          border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12,
+          padding: 20, marginBottom: 16, maxWidth: 520, fontSize: 13,
+          lineHeight: 1.7, color: "#94a3b8",
+        }}>
+          <b style={{ color: "#f59e0b" }}>Texas Hold'em — Heads Up Rules</b><br />
+          Each player gets 2 hole cards. 5 community cards are dealt in rounds (flop: 3, turn: 1, river: 1).
+          Make the best 5-card hand from your 2 cards + 5 community cards. Blinds are $10/$20.
+          The bot uses position-aware strategy with bluffing. Good luck!
+          <br /><br />
+          <b>Hand Rankings:</b> Royal Flush → Straight Flush → Four of a Kind → Full House → Flush → Straight → Three of a Kind → Two Pair → One Pair → High Card
+        </div>
+      )}
+
+      <div style={{
+        width: "100%", maxWidth: 600,
+        background: "radial-gradient(ellipse at center, #1a4a2e 0%, #0f3321 60%, #0a2618 100%)",
+        borderRadius: 140, border: "8px solid #2a1a0a",
+        boxShadow: "inset 0 0 60px rgba(0,0,0,0.5), 0 0 40px rgba(0,0,0,0.6), 0 0 0 3px #4a3520",
+        padding: "28px 24px", position: "relative", minHeight: 400,
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "space-between",
+      }}>
+        <div style={{
+          position: "absolute", inset: 0, borderRadius: 132, opacity: 0.15,
+          backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 4 4' xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='1' height='1' fill='%23000' opacity='0.3'/%3E%3C/svg%3E")`,
+          backgroundSize: "4px 4px", pointerEvents: "none",
+        }} />
+
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, zIndex: 1 }}>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 10,
+            background: "rgba(0,0,0,0.4)", padding: "6px 14px", borderRadius: 20,
+          }}>
+            <span style={{ fontSize: 20 }}>🤖</span>
+            <span style={{ fontWeight: 700, fontSize: 14, color: "#e2e8f0" }}>Bot</span>
+            <ChipStack amount={botChips} />
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            {gameState?.botCards.map((card, i) => (
+              <Card key={i} card={card} faceDown={!showBotCards} small />
+            )) || [0, 1].map((i) => <Card key={i} card={{ suit: "♠", rank: "A" }} faceDown small />)}
+          </div>
+          {showBotCards && gameState && (
+            <div style={{
+              fontSize: 11, color: "#94a3b8", background: "rgba(0,0,0,0.4)",
+              padding: "2px 10px", borderRadius: 8,
+            }}>
+              {evaluateBestHand([...gameState.botCards, ...gameState.community]).name}
+            </div>
+          )}
+        </div>
+
+        <div style={{
+          display: "flex", flexDirection: "column", alignItems: "center",
+          gap: 12, zIndex: 1, margin: "8px 0",
+        }}>
+          {gameState && (
+            <div style={{
+              background: "rgba(0,0,0,0.5)", padding: "4px 16px", borderRadius: 16,
+              color: "#f59e0b", fontWeight: 700, fontSize: 16,
+              fontFamily: "'JetBrains Mono', monospace",
+              boxShadow: "0 0 12px rgba(245,158,11,0.2)",
+            }}>
+              Pot: ${gameState.pot}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 6, minHeight: 104, alignItems: "center" }}>
+            {gameState?.community.length > 0
+              ? gameState.community.map((card, i) => <Card key={i} card={card} />)
+              : <span style={{ color: "#2a6a4a", fontSize: 14, fontStyle: "italic" }}>
+                  {gameState ? "Waiting for flop..." : "Deal to start"}
+                </span>
+            }
+          </div>
+          {gameState && !gameState.handOver && (
+            <div style={{
+              fontSize: 11, color: "#64748b", textTransform: "uppercase", letterSpacing: 2,
+            }}>
+              {gameState.stage} {isAnimating ? "• Bot thinking..." : gameState.playerTurn ? "• Your turn" : ""}
+            </div>
+          )}
+        </div>
+
+        {handResult && (
+          <div style={{
+            position: "absolute", top: "50%", left: "50%",
+            transform: "translate(-50%, -50%)",
+            background: handResult.includes("You win") ? "rgba(16,185,129,0.95)" : handResult.includes("Split") ? "rgba(59,130,246,0.95)" : "rgba(239,68,68,0.9)",
+            color: "#fff", fontWeight: 700, fontSize: 15,
+            padding: "10px 24px", borderRadius: 12, zIndex: 10,
+            boxShadow: "0 4px 20px rgba(0,0,0,0.5)", textAlign: "center",
+            maxWidth: "85%", backdropFilter: "blur(4px)",
+          }}>
+            {handResult}
+          </div>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, zIndex: 1 }}>
+          {gameState && (
+            <div style={{
+              fontSize: 11, color: "#94a3b8", background: "rgba(0,0,0,0.4)",
+              padding: "2px 10px", borderRadius: 8,
+            }}>
+              {gameState.community.length >= 3
+                ? evaluateBestHand([...gameState.playerCards, ...gameState.community]).name
+                : "—"}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 6 }}>
+            {gameState?.playerCards.map((card, i) => (
+              <Card key={i} card={card} highlight />
+            )) || [0, 1].map((i) => <Card key={i} card={{ suit: "♠", rank: "A" }} faceDown />)}
+          </div>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 10,
+            background: "rgba(0,0,0,0.4)", padding: "6px 14px", borderRadius: 20,
+          }}>
+            <span style={{ fontSize: 20 }}>😎</span>
+            <span style={{ fontWeight: 700, fontSize: 14, color: "#e2e8f0" }}>You</span>
+            <ChipStack amount={playerChips} />
+          </div>
+        </div>
+      </div>
+
+      <div style={{
+        marginTop: 16, display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
+        width: "100%", maxWidth: 520,
+      }}>
+        {(!gameState || gameState.handOver) ? (
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
+            <button onClick={startNewHand} style={{
+              padding: "12px 32px", fontSize: 15, fontWeight: 700, cursor: "pointer",
+              background: "linear-gradient(135deg, #f59e0b, #d97706)", color: "#0a0a12",
+              border: "none", borderRadius: 8, letterSpacing: 1, textTransform: "uppercase",
+              boxShadow: "0 4px 16px rgba(245,158,11,0.3)",
+              transition: "transform 0.15s, box-shadow 0.15s",
+            }}
+              onMouseEnter={(e) => { e.target.style.transform = "translateY(-2px)"; e.target.style.boxShadow = "0 6px 24px rgba(245,158,11,0.4)"; }}
+              onMouseLeave={(e) => { e.target.style.transform = "none"; e.target.style.boxShadow = "0 4px 16px rgba(245,158,11,0.3)"; }}
+            >
+              {gameState ? "Deal Next Hand" : "Start Game"}
+            </button>
+            {(playerChips < 10 || botChips < 10) && (
+              <button onClick={() => { setPlayerChips(1000); setBotChips(1000); setHandsPlayed(0); setHandsWon(0); setLog([]); setGameState(null); setHandResult(null); }} style={{
+                padding: "12px 24px", fontSize: 14, fontWeight: 600, cursor: "pointer",
+                background: "rgba(255,255,255,0.08)", color: "#94a3b8",
+                border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8,
+              }}>
+                Reset Game
+              </button>
+            )}
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
+              {canCheck && (
+                <ActionBtn label="Check" color="#10b981" onClick={() => playerAction("check")} disabled={!isPlayerTurn} />
+              )}
+              {canCall && (
+                <ActionBtn label={`Call $${gameState.currentBet}`} color="#3b82f6" onClick={() => playerAction("call")} disabled={!isPlayerTurn} />
+              )}
+              <ActionBtn label="Fold" color="#ef4444" onClick={() => playerAction("fold")} disabled={!isPlayerTurn} />
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="range" min={Math.max(40, (gameState?.currentBet || 0) * 2)}
+                max={playerChips} step={10} value={raiseAmount}
+                onChange={(e) => setRaiseAmount(+e.target.value)}
+                style={{ width: 140, accentColor: "#f59e0b" }}
+              />
+              <ActionBtn label={`Raise $${raiseAmount}`} color="#f59e0b" onClick={() => playerAction("raise", raiseAmount)} disabled={!isPlayerTurn} />
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div ref={logRef} style={{
+        marginTop: 16, width: "100%", maxWidth: 520, maxHeight: 130,
+        overflowY: "auto", background: "rgba(0,0,0,0.3)", borderRadius: 8,
+        padding: "8px 12px", border: "1px solid rgba(255,255,255,0.06)",
+        fontSize: 12, lineHeight: 1.8, color: "#94a3b8",
+        fontFamily: "'JetBrains Mono', monospace",
+        scrollbarWidth: "thin", scrollbarColor: "#333 transparent",
+      }}>
+        {log.length === 0 ? (
+          <span style={{ color: "#475569" }}>Game log will appear here...</span>
+        ) : log.map((msg, i) => (
+          <div key={i} style={{
+            borderBottom: "1px solid rgba(255,255,255,0.03)", padding: "2px 0",
+            color: msg.includes("🏆") ? "#10b981" : msg.includes("😤") ? "#ef4444" : msg.includes("──") ? "#f59e0b" : "#94a3b8",
+          }}>{msg}</div>
+        ))}
+      </div>
+
+      <p style={{ marginTop: 16, fontSize: 11, color: "#334155", letterSpacing: 1 }}>
+        Built with React • Texas Hold'em AI with position-aware strategy
+      </p>
+    </div>
+  );
+}
+
+function ActionBtn({ label, color, onClick, disabled }) {
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: disabled ? "not-allowed" : "pointer",
+      background: disabled ? "#1e293b" : color, color: disabled ? "#475569" : "#fff",
+      border: "none", borderRadius: 6, textTransform: "uppercase", letterSpacing: 0.5,
+      opacity: disabled ? 0.5 : 1, transition: "transform 0.12s, opacity 0.2s",
+      boxShadow: disabled ? "none" : `0 2px 10px ${color}44`,
+    }}
+      onMouseEnter={(e) => { if (!disabled) e.target.style.transform = "translateY(-1px)"; }}
+      onMouseLeave={(e) => { e.target.style.transform = "none"; }}
+    >
+      {label}
+    </button>
+  );
+}
+
+ReactDOM.render(<PokerBot />, document.getElementById("root"));
+</script>
+</body>
+</html>
